@@ -23,7 +23,7 @@ engines: `kong` (API gateways) and `postgres` (primary + streaming replica).
 
 ## Milestones
 
-- [ ] **M0 Toolchain**: Homebrew `go kind kubectl colima docker`; `colima start --cpu 4 --memory 3`; `kind create cluster --name fleet`; check `kubectl get nodes`.
+- [x] **M0 Toolchain**: Homebrew `go kind kubectl colima docker`; `colima start --cpu 4 --memory 3`; `kind create cluster --name fleet`; check `kubectl get nodes`.
 - [ ] **M1 Skeleton**: Go module `github.com/Vinaymuniraju/fleet-control-plane`; `cmd/fleetd` (server) + `cmd/fleetctl` (CLI); `internal/api` REST on stdlib `net/http` (`POST/GET/PATCH/DELETE /v1/services`); `internal/store` interface with in-memory impl; Makefile; unit tests for the API.
 - [ ] **M2 Kong engine**: `internal/engine` interface (`Apply`, `Observe`, `Delete`); Kong engine creates Namespace, ConfigMap (declarative `kong.yml`), Deployment (Kong OSS DB-less, N replicas), Service via client-go; observes readiness through the Admin API `/status`; unit tests with the fake clientset.
 - [ ] **M3 Reconciler**: periodic + event-triggered loop comparing desired vs observed; config hash annotation drives rolling config updates; image change drives version upgrades; drift detection (manual edit / deleted Deployment) and self-heal; per-service event log at `GET /v1/services/{id}/events`.
@@ -38,3 +38,4 @@ engines: `kong` (API gateways) and `postgres` (primary + streaming replica).
 ## Log
 
 <!-- one line per finished milestone: date, milestone, what was verified -->
+- 2026-11-23 M0: go 1.27.4, colima 4cpu/3GB, kind v1.37 node `fleet-control-plane` Ready.
