@@ -25,6 +25,10 @@ $ fleetctl events edge
 01:38:50  Normal   PhaseChanged    Degraded -> Ready (2/2 ready); recovered in 3.7s
 ```
 
+> **New to this?** [docs/PROJECT_JOURNEY.md](docs/PROJECT_JOURNEY.md) is a beginner-friendly
+> walkthrough of the whole project: the goal, the design, how it was built, every problem
+> hit along the way and how it was fixed, how it was tested, and what comes next.
+
 ## What it does
 
 | | Kong engine | Postgres engine |
@@ -141,7 +145,7 @@ admission policy), not a faster reconcile.
 | Planned switchover | 0 bytes lost: the replica must replay to the primary's last LSN before promotion |
 | Hand-delete the Deployment / ConfigMap / Service of any engine | Shown as a `Warning` event and the `fleet_drift_detected_total` metric, then reverted |
 
-`scripts/e2e.sh` asserts all of this on every run (15 checks: traffic through Kong, drift
+`scripts/e2e.sh` asserts all of this on every run (14 checks: traffic through Kong, drift
 heal, replication, settings, extensions, switchover with data check, hung-primary
 failover, rejoin, teardown).
 
@@ -245,4 +249,5 @@ internal/engine   Kong and Postgres engines, Kubernetes helpers, exec
 internal/metrics  Prometheus collectors
 deploy/           fleetd + state DB, echo upstream, Prometheus + Grafana
 scripts/          up.sh, e2e.sh, chaos.sh
+docs/             project journey, chaos results, original build plan
 ```
