@@ -1,0 +1,149 @@
+# fleetd running inside the cluster it manages.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fleet-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fleetd
+  namespace: fleet-system
+---
+# Least privilege for what the engines touch. Namespaces are cluster-scoped
+# because every managed service gets its own.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fleetd
+rules:
+  - apiGroups: [""]
+    resources: [namespaces, configmaps, secrets, services, persistentvolumeclaims]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch, delete, patch]
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [services/proxy]
+    verbs: [get]
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [policy]
+    resources: [poddisruptionbudgets]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fleetd
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fleetd
+subjects:
+  - kind: ServiceAccount
+    name: fleetd
+    namespace: fleet-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fleetd
+  namespace: fleet-system
+spec:
+  replicas: 1 # single writer; a real deployment would add leader election
+  selector:
+    matchLabels: {app: fleetd}
+  template:
+    metadata:
+      labels: {app: fleetd}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+    spec:
+      serviceAccountName: fleetd
+      containers:
+        - name: fleetd
+          image: fleetd:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: FLEET_STORE, value: postgres}
+            - name: FLEET_DSN
+              valueFrom: {secretKeyRef: {name: fleetdb, key: dsn}}
+          ports: [{name: http, containerPort: 8080}]
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {memory: 128Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fleetd
+  namespace: fleet-system
+spec:
+  selector: {app: fleetd}
+  ports: [{name: http, port: 8080, targetPort: http}]
+---
+# The control plane's own state database. One small Postgres; a production
+# control plane would run this as a managed HA database, not next to fleetd.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: fleetdb
+  namespace: fleet-system
+stringData:
+  password: fleet-local-dev-only
+  dsn: postgres://fleet:fleet-local-dev-only@fleetdb.fleet-system.svc:5432/fleet?sslmode=disable
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: fleetdb
+  namespace: fleet-system
+spec:
+  serviceName: fleetdb
+  replicas: 1
+  selector:
+    matchLabels: {app: fleetdb}
+  template:
+    metadata:
+      labels: {app: fleetdb}
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          env:
+            - {name: POSTGRES_USER, value: fleet}
+            - {name: POSTGRES_DB, value: fleet}
+            - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+            - name: POSTGRES_PASSWORD
+              valueFrom: {secretKeyRef: {name: fleetdb, key: password}}
+          ports: [{containerPort: 5432}]
+          readinessProbe:
+            exec: {command: [pg_isready, -U, fleet, -h, 127.0.0.1]}
+            periodSeconds: 3
+          resources:
+            requests: {cpu: 25m, memory: 48Mi}
+            limits: {memory: 192Mi}
+          volumeMounts: [{name: data, mountPath: /var/lib/postgresql/data}]
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 1Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fleetdb
+  namespace: fleet-system
+spec:
+  selector: {app: fleetdb}
+  ports: [{port: 5432, targetPort: 5432}]

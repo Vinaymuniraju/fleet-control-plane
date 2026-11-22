@@ -79,8 +79,17 @@ func DeclarativeConfig(spec *model.KongSpec) ([]byte, string, error) {
 		for _, p := range spec.Plugins {
 			cfg.Plugins = append(cfg.Plugins, plugin{Name: p.Name, Config: pluginDefaults(p)})
 		}
-		sort.Slice(cfg.Plugins, func(i, j int) bool { return cfg.Plugins[i].Name < cfg.Plugins[j].Name })
 	}
+	// Observability is platform-owned: every gateway exports Prometheus metrics
+	// on its status listener whether or not the user asked for the plugin.
+	hasProm := false
+	for _, p := range cfg.Plugins {
+		hasProm = hasProm || p.Name == "prometheus"
+	}
+	if !hasProm {
+		cfg.Plugins = append(cfg.Plugins, plugin{Name: "prometheus", Config: pluginDefaults(model.Plugin{Name: "prometheus"})})
+	}
+	sort.Slice(cfg.Plugins, func(i, j int) bool { return cfg.Plugins[i].Name < cfg.Plugins[j].Name })
 	b, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return nil, "", err
@@ -96,6 +105,8 @@ func pluginDefaults(p model.Plugin) map[string]any {
 	switch p.Name {
 	case "rate-limiting":
 		return map[string]any{"minute": 600, "policy": "local"}
+	case "prometheus":
+		return map[string]any{"status_code_metrics": true, "latency_metrics": true, "bandwidth_metrics": true, "upstream_health_metrics": true}
 	case "key-auth":
 		return map[string]any{"key_names": []string{"apikey"}}
 	}
@@ -141,8 +152,12 @@ func (k *Kong) objects(svc *model.Service) (*corev1.ConfigMap, *appsv1.Deploymen
 			Strategy: *maxUnavailableZero(),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels:      podLabels,
-					Annotations: map[string]string{AnnoConfigHash: hash},
+					Labels: podLabels,
+					Annotations: map[string]string{
+						AnnoConfigHash:         hash,
+						"prometheus.io/scrape": "true",
+						"prometheus.io/port":   "8100",
+					},
 				},
 				Spec: corev1.PodSpec{
 					TerminationGracePeriodSeconds: ptr64(15),

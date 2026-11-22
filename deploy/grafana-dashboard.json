@@ -1,0 +1,60 @@
+{
+  "uid": "fleet-overview",
+  "title": "Fleet control plane",
+  "schemaVersion": 39,
+  "time": {"from": "now-30m", "to": "now"},
+  "refresh": "5s",
+  "panels": [
+    {
+      "type": "stat", "title": "Services Ready", "gridPos": {"x": 0, "y": 0, "w": 6, "h": 4},
+      "targets": [{"expr": "sum(fleet_service_ready)", "legendFormat": "ready"}]
+    },
+    {
+      "type": "stat", "title": "Services not Ready", "gridPos": {"x": 6, "y": 0, "w": 6, "h": 4},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}},
+      "targets": [{"expr": "count(fleet_service_ready == 0) or vector(0)", "legendFormat": "not ready"}]
+    },
+    {
+      "type": "stat", "title": "Drift corrected (1h)", "gridPos": {"x": 12, "y": 0, "w": 6, "h": 4},
+      "targets": [{"expr": "sum(increase(fleet_drift_detected_total[1h]))", "legendFormat": "drift"}]
+    },
+    {
+      "type": "stat", "title": "p95 recovery time", "gridPos": {"x": 18, "y": 0, "w": 6, "h": 4},
+      "fieldConfig": {"defaults": {"unit": "s"}},
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le) (rate(fleet_recovery_seconds_bucket[1h])))", "legendFormat": "p95"}]
+    },
+    {
+      "type": "timeseries", "title": "Ready vs desired replicas", "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "fleet_service_ready_replicas", "legendFormat": "{{service}} ready"},
+        {"expr": "fleet_service_desired_replicas", "legendFormat": "{{service}} desired"}
+      ]
+    },
+    {
+      "type": "timeseries", "title": "Reconcile latency (p50 / p99)", "gridPos": {"x": 12, "y": 4, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "s"}},
+      "targets": [
+        {"expr": "histogram_quantile(0.5, sum by (le, engine) (rate(fleet_reconcile_duration_seconds_bucket[5m])))", "legendFormat": "{{engine}} p50"},
+        {"expr": "histogram_quantile(0.99, sum by (le, engine) (rate(fleet_reconcile_duration_seconds_bucket[5m])))", "legendFormat": "{{engine}} p99"}
+      ]
+    },
+    {
+      "type": "timeseries", "title": "Gateway requests by status (Kong)", "gridPos": {"x": 0, "y": 12, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (code) (rate(kong_http_requests_total[1m]))", "legendFormat": "{{code}}"}]
+    },
+    {
+      "type": "timeseries", "title": "Gateway latency p99 (Kong)", "gridPos": {"x": 12, "y": 12, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "ms"}},
+      "targets": [{"expr": "histogram_quantile(0.99, sum by (le, service) (rate(kong_request_latency_ms_bucket[1m])))", "legendFormat": "{{service}}"}]
+    },
+    {
+      "type": "timeseries", "title": "Postgres replication lag", "gridPos": {"x": 0, "y": 20, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "bytes"}},
+      "targets": [{"expr": "fleet_postgres_replication_lag_bytes", "legendFormat": "{{service}}"}]
+    },
+    {
+      "type": "state-timeline", "title": "Service phase", "gridPos": {"x": 12, "y": 20, "w": 12, "h": 8},
+      "targets": [{"expr": "max by (service, phase) (fleet_service_phase) == 1", "legendFormat": "{{service}} {{phase}}"}]
+    }
+  ]
+}

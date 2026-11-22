@@ -1,0 +1,57 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: vet + unit tests (memory and Postgres stores)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 2s --health-retries 20
+    env:
+      FLEET_TEST_DSN: postgres://postgres:test@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+      - run: go build ./cmd/...
+
+  e2e:
+    name: end-to-end on kind
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: fleet
+      - name: e2e
+        run: make e2e
+      - name: dump state on failure
+        if: failure()
+        run: |
+          kubectl get pods -A -o wide
+          kubectl -n fleet-system logs deploy/fleetd --tail=200 || true
+          for ns in $(kubectl get ns -o name | grep fleet- | cut -d/ -f2); do kubectl -n "$ns" get all; kubectl -n "$ns" logs -l app --tail=50 --prefix || true; done

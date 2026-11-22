@@ -210,6 +210,25 @@ func (r *Reconciler) reconcile(ctx context.Context, svc *model.Service, eng engi
 		}
 	}
 
+	// Runtime management (roles, settings, automatic failover) for engines that need it.
+	if m, ok := eng.(engine.Maintainer); ok && obs.Exists {
+		events, err := m.Maintain(ctx, svc)
+		for _, e := range events {
+			r.event(ctx, svc, e.Type, e.Reason, e.Message)
+			if e.Reason == "PrimaryDown" {
+				r.markUnhealthy(svc.ID)
+			}
+		}
+		if err != nil {
+			r.event(ctx, svc, model.EventWarning, "MaintainFailed", err.Error())
+		}
+		if len(events) > 0 {
+			if obs, err = eng.Observe(ctx, svc); err != nil {
+				return 0, fmt.Errorf("observe after maintain: %w", err)
+			}
+		}
+	}
+
 	prev := svc.Status.Phase
 	svc.Status.ObservedGeneration = svc.Generation
 	svc.Status.ReadyReplicas = obs.ReadyReplicas
@@ -224,6 +243,12 @@ func (r *Reconciler) reconcile(ctx context.Context, svc *model.Service, eng engi
 
 	if svc.Status.Phase != prev {
 		r.onPhaseChange(ctx, svc, prev)
+	} else if svc.Status.Phase == model.PhaseReady {
+		// Drift healed before readiness was ever lost: still a recovery, close it out.
+		if d, ok := r.takeUnhealthy(svc.ID); ok {
+			r.opts.Recorder.Recovered(svc.Engine, d)
+			r.event(ctx, svc, model.EventNormal, "Recovered", fmt.Sprintf("drift healed without losing readiness; recovered in %.1fs", d.Seconds()))
+		}
 	}
 	if err := r.writeStatus(ctx, svc); err != nil {
 		return 0, err
@@ -254,7 +279,6 @@ func phaseFor(svc *model.Service, obs engine.Observed, prev model.Phase) model.P
 }
 
 func (r *Reconciler) onPhaseChange(ctx context.Context, svc *model.Service, prev model.Phase) {
-	now := r.opts.Now()
 	cur := svc.Status.Phase
 	typ := model.EventNormal
 	if cur == model.PhaseDegraded || cur == model.PhaseFailed {
@@ -266,17 +290,24 @@ func (r *Reconciler) onPhaseChange(ctx context.Context, svc *model.Service, prev
 		msg += ": " + svc.Status.Message
 	}
 	if cur == model.PhaseReady {
-		r.mu.Lock()
-		since, ok := r.unhealthySince[svc.ID]
-		delete(r.unhealthySince, svc.ID)
-		r.mu.Unlock()
-		if ok {
-			d := now.Sub(since)
+		if d, ok := r.takeUnhealthy(svc.ID); ok {
 			r.opts.Recorder.Recovered(svc.Engine, d)
 			msg += fmt.Sprintf("; recovered in %.1fs", d.Seconds())
 		}
 	}
 	r.event(ctx, svc, typ, "PhaseChanged", msg)
+}
+
+// takeUnhealthy returns how long id has been unhealthy and clears the mark.
+func (r *Reconciler) takeUnhealthy(id string) (time.Duration, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	since, ok := r.unhealthySince[id]
+	delete(r.unhealthySince, id)
+	if !ok {
+		return 0, false
+	}
+	return r.opts.Now().Sub(since), true
 }
 
 func (r *Reconciler) markUnhealthy(id string) {
@@ -332,4 +363,38 @@ func orPending(p model.Phase) model.Phase {
 		return model.PhasePending
 	}
 	return p
+}
+
+// Failover runs a planned switchover for a service whose engine supports it.
+// It implements api.Actions.
+func (r *Reconciler) Failover(ctx context.Context, id string) error {
+	svc, err := r.store.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	eng, err := r.engines.For(svc)
+	if err != nil {
+		return err
+	}
+	f, ok := eng.(engine.Failoverer)
+	if !ok {
+		return fmt.Errorf("%s does not support failover", svc.Engine)
+	}
+	if svc.Spec.Replicas < 2 {
+		return fmt.Errorf("failover needs at least 2 replicas")
+	}
+	r.markUnhealthy(svc.ID)
+	r.event(ctx, svc, model.EventNormal, "SwitchoverRequested", "planned switchover requested via API")
+	events, err := f.Failover(ctx, svc, true)
+	for _, e := range events {
+		r.event(ctx, svc, e.Type, e.Reason, e.Message)
+	}
+	r.Enqueue(id)
+	if err != nil {
+		r.event(ctx, svc, model.EventWarning, "SwitchoverFailed", err.Error())
+		r.mu.Lock()
+		delete(r.unhealthySince, svc.ID)
+		r.mu.Unlock()
+	}
+	return err
 }

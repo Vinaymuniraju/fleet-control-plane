@@ -278,3 +278,27 @@ func TestRunLoopConverges(t *testing.T) {
 	}
 	t.Fatal("loop did not converge to Ready")
 }
+
+func TestDriftHealedWhileReadyStillCountsAsRecovery(t *testing.T) {
+	r, st, fe, _, rc, svc := setup(t)
+	fe.set(func(o *engine.Observed) { o.ReadyReplicas = 2 })
+	mustReconcile(t, r, svc.ID)
+
+	// A ConfigMap edit: drift, but pods keep serving the old config.
+	fe.set(func(o *engine.Observed) { o.Drift = []string{"configmap edited outside the control plane"} })
+	mustReconcile(t, r, svc.ID)
+	if len(rc.recovered) != 1 {
+		t.Fatalf("want the healed drift recorded as one recovery, got %v", rc.recovered)
+	}
+	if ev := reasons(t, st, svc.ID); !strings.HasSuffix(ev, "DriftDetected,DriftCorrected,Recovered") {
+		t.Fatalf("events: %s", ev)
+	}
+	// Nothing stale left behind for the next planned rollout to pick up.
+	fe.set(func(o *engine.Observed) { o.Message = "rollout in progress: 1/2 updated" })
+	mustReconcile(t, r, svc.ID)
+	fe.set(func(o *engine.Observed) { o.Message = "" })
+	mustReconcile(t, r, svc.ID)
+	if len(rc.recovered) != 1 {
+		t.Fatalf("a planned rollout must not be reported as a recovery: %v", rc.recovered)
+	}
+}

@@ -9,8 +9,10 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
 
 // Kube wraps the typed client with create-or-update helpers. Each helper
@@ -18,6 +20,7 @@ import (
 // changed anything, so callers can tell a no-op apply from a real one.
 type Kube struct {
 	Client kubernetes.Interface
+	Config *rest.Config // needed only for Exec
 }
 
 func (k Kube) EnsureNamespace(ctx context.Context, name string, labels map[string]string) error {
@@ -139,4 +142,37 @@ func maxUnavailableZero() *appsv1.DeploymentStrategy {
 		Type:          appsv1.RollingUpdateDeploymentStrategyType,
 		RollingUpdate: &appsv1.RollingUpdateDeployment{MaxUnavailable: &zero, MaxSurge: &one},
 	}
+}
+
+func (k Kube) EnsureStatefulSet(ctx context.Context, want *appsv1.StatefulSet) error {
+	c := k.Client.AppsV1().StatefulSets(want.Namespace)
+	cur, err := c.Get(ctx, want.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		_, err = c.Create(ctx, want, metav1.CreateOptions{})
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	// Selector, serviceName and volumeClaimTemplates are immutable; only the
+	// mutable fields are carried over.
+	cur.Labels = want.Labels
+	for k, v := range want.Annotations {
+		if cur.Annotations == nil {
+			cur.Annotations = map[string]string{}
+		}
+		cur.Annotations[k] = v
+	}
+	cur.Spec.Replicas = want.Spec.Replicas
+	cur.Spec.Template = want.Spec.Template
+	cur.Spec.UpdateStrategy = want.Spec.UpdateStrategy
+	_, err = c.Update(ctx, cur, metav1.UpdateOptions{})
+	return err
+}
+
+// LabelPod sets one label on a pod.
+func (k Kube) LabelPod(ctx context.Context, ns, pod, key, value string) error {
+	patch := fmt.Sprintf(`{"metadata":{"labels":{%q:%q}}}`, key, value)
+	_, err := k.Client.CoreV1().Pods(ns).Patch(ctx, pod, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
+	return err
 }

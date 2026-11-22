@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/Vinaymuniraju/fleet-control-plane/internal/api"
 	"github.com/Vinaymuniraju/fleet-control-plane/internal/engine"
+	"github.com/Vinaymuniraju/fleet-control-plane/internal/metrics"
 	"github.com/Vinaymuniraju/fleet-control-plane/internal/model"
 	"github.com/Vinaymuniraju/fleet-control-plane/internal/reconciler"
 	"github.com/Vinaymuniraju/fleet-control-plane/internal/store"
@@ -29,19 +31,21 @@ func main() {
 	kubeconfig := flag.String("kubeconfig", defaultKubeconfig(), "kubeconfig path (empty = in-cluster)")
 	resync := flag.Duration("resync", 30*time.Second, "full reconcile interval")
 	workers := flag.Int("workers", 4, "parallel reconcile workers")
+	storeKind := flag.String("store", envOr("FLEET_STORE", "memory"), "state store: memory or postgres")
+	dsn := flag.String("dsn", os.Getenv("FLEET_DSN"), "Postgres DSN for -store=postgres")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, log, *addr, *kubeconfig, *resync, *workers); err != nil {
+	if err := run(ctx, log, *addr, *kubeconfig, *resync, *workers, *storeKind, *dsn); err != nil {
 		log.Error("fleetd failed", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, log *slog.Logger, addr, kubeconfig string, resync time.Duration, workers int) error {
+func run(ctx context.Context, log *slog.Logger, addr, kubeconfig string, resync time.Duration, workers int, storeKind, dsn string) error {
 	cfg, err := kubeConfig(kubeconfig)
 	if err != nil {
 		return err
@@ -51,21 +55,41 @@ func run(ctx context.Context, log *slog.Logger, addr, kubeconfig string, resync 
 	if err != nil {
 		return err
 	}
-	kube := engine.Kube{Client: client}
+	kube := engine.Kube{Client: client, Config: cfg}
 
-	st := store.NewMemory()
-	engines := engine.Registry{
-		model.EngineKong: engine.NewKong(kube),
+	var st store.Store
+	switch storeKind {
+	case "memory":
+		st = store.NewMemory()
+		log.Warn("using the in-memory store: state is lost on restart")
+	case "postgres":
+		pg, err := store.OpenPostgres(ctx, dsn)
+		if err != nil {
+			return fmt.Errorf("state store: %w", err)
+		}
+		defer pg.Close()
+		st = pg
+		log.Info("using the Postgres state store")
+	default:
+		return fmt.Errorf("unknown -store %q", storeKind)
 	}
-	rec := reconciler.New(st, engines, reconciler.Options{Workers: workers, Resync: resync, Log: log})
+	engines := engine.Registry{
+		model.EngineKong:     engine.NewKong(kube),
+		model.EnginePostgres: engine.NewPostgres(kube),
+	}
+	m := metrics.New()
+	rec := reconciler.New(st, engines, reconciler.Options{Workers: workers, Resync: resync, Log: log, Recorder: m})
 	if err := rec.Watch(ctx, client); err != nil {
 		return err
 	}
 	go rec.Run(ctx)
 
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", m.Handler())
+	mux.Handle("/", api.New(st, rec.Enqueue, rec, log).Handler())
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           api.New(st, rec.Enqueue, nil, log).Handler(),
+		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {
@@ -98,4 +122,11 @@ func defaultKubeconfig() string {
 		return p
 	}
 	return ""
+}
+
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
 }
