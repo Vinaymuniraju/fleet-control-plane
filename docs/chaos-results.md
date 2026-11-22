@@ -1,5 +1,7 @@
 # Chaos results
 
+## Kong gateway
+
 Measured by `scripts/chaos.sh` on 2026-11-22 against a single-node kind cluster (colima, 4 vCPU / 3 GB) on an M-series Mac.
 Gateway: Kong OSS, 2 replicas, DB-less. Load: 50 req/s from a pod inside the cluster through the `kong-proxy` Service.
 
@@ -39,3 +41,20 @@ in about 100 ms, long before any pod restarted.
 load on a 4-vCPU laptop VM. No request failed.
 
 Reproduce with `make chaos` (needs `scripts/up.sh` first and a port-forward to fleetd).
+
+## Postgres cluster
+
+Measured on the same laptop cluster, by hand and in `scripts/e2e.sh`. Postgres 17,
+1 primary + 1 streaming replica (asynchronous replication).
+
+| Fault | What the control plane did | Time |
+| --- | --- | --- |
+| Primary **hung** (postmaster frozen with SIGSTOP from the node: pod still "Running", serving nothing) | Saw the primary go unready; waited the 10 s grace period; promoted the replica with the highest replay LSN; moved `pg-rw`; fenced and deleted the old primary, which re-cloned itself as a replica | promoted at **14.0 s**, accepting writes at **14.2 s**, both nodes streaming again at **17.4 s** |
+| Planned switchover (`fleetctl failover`) | Fenced the primary (out of `pg-rw`, read-only, sessions dropped), waited until the replica replayed to the primary's last LSN, promoted it | **0 bytes** lost; the row written before the switchover and the one after are both on the new primary |
+| Primary pod deleted | Pod restarted on its own volume within the 10 s grace period, so no failover was needed | Ready again in a few seconds |
+
+Every row committed before the hang was on the new primary. With asynchronous
+replication, an unplanned failover can lose the last transactions the primary
+acknowledged but never shipped, which is why the event says "data loss unknown". The
+production answer is synchronous replication (`synchronous_standby_names = 'ANY 1 (*)'`),
+which the README lists as a next step.

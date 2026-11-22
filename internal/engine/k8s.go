@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/retry"
 )
 
 // Kube wraps the typed client with create-or-update helpers. Each helper
@@ -39,18 +40,22 @@ func (k Kube) EnsureNamespace(ctx context.Context, name string, labels map[strin
 }
 
 func (k Kube) EnsureConfigMap(ctx context.Context, want *corev1.ConfigMap) error {
-	c := k.Client.CoreV1().ConfigMaps(want.Namespace)
-	cur, err := c.Get(ctx, want.Name, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		_, err = c.Create(ctx, want, metav1.CreateOptions{})
+	// Another controller may update the object between our Get and Update
+	// (e.g. PDB status); re-read and retry instead of failing the reconcile.
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		c := k.Client.CoreV1().ConfigMaps(want.Namespace)
+		cur, err := c.Get(ctx, want.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			_, err = c.Create(ctx, want, metav1.CreateOptions{})
+			return err
+		}
+		if err != nil {
+			return err
+		}
+		cur.Labels, cur.Data = want.Labels, want.Data
+		_, err = c.Update(ctx, cur, metav1.UpdateOptions{})
 		return err
-	}
-	if err != nil {
-		return err
-	}
-	cur.Labels, cur.Data = want.Labels, want.Data
-	_, err = c.Update(ctx, cur, metav1.UpdateOptions{})
-	return err
+	})
 }
 
 func (k Kube) EnsureSecret(ctx context.Context, want *corev1.Secret) (*corev1.Secret, error) {
@@ -64,58 +69,70 @@ func (k Kube) EnsureSecret(ctx context.Context, want *corev1.Secret) (*corev1.Se
 }
 
 func (k Kube) EnsureService(ctx context.Context, want *corev1.Service) error {
-	c := k.Client.CoreV1().Services(want.Namespace)
-	cur, err := c.Get(ctx, want.Name, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		_, err = c.Create(ctx, want, metav1.CreateOptions{})
+	// Another controller may update the object between our Get and Update
+	// (e.g. PDB status); re-read and retry instead of failing the reconcile.
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		c := k.Client.CoreV1().Services(want.Namespace)
+		cur, err := c.Get(ctx, want.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			_, err = c.Create(ctx, want, metav1.CreateOptions{})
+			return err
+		}
+		if err != nil {
+			return err
+		}
+		cur.Labels = want.Labels
+		cur.Spec.Selector = want.Spec.Selector
+		cur.Spec.Ports = want.Spec.Ports
+		_, err = c.Update(ctx, cur, metav1.UpdateOptions{})
 		return err
-	}
-	if err != nil {
-		return err
-	}
-	cur.Labels = want.Labels
-	cur.Spec.Selector = want.Spec.Selector
-	cur.Spec.Ports = want.Spec.Ports
-	_, err = c.Update(ctx, cur, metav1.UpdateOptions{})
-	return err
+	})
 }
 
 func (k Kube) EnsureDeployment(ctx context.Context, want *appsv1.Deployment) error {
-	c := k.Client.AppsV1().Deployments(want.Namespace)
-	cur, err := c.Get(ctx, want.Name, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		_, err = c.Create(ctx, want, metav1.CreateOptions{})
+	// Another controller may update the object between our Get and Update
+	// (e.g. PDB status); re-read and retry instead of failing the reconcile.
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		c := k.Client.AppsV1().Deployments(want.Namespace)
+		cur, err := c.Get(ctx, want.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			_, err = c.Create(ctx, want, metav1.CreateOptions{})
+			return err
+		}
+		if err != nil {
+			return err
+		}
+		cur.Labels = want.Labels
+		cur.Annotations = want.Annotations
+		cur.Spec.Replicas = want.Spec.Replicas
+		cur.Spec.Strategy = want.Spec.Strategy
+		cur.Spec.Template = want.Spec.Template
+		_, err = c.Update(ctx, cur, metav1.UpdateOptions{})
 		return err
-	}
-	if err != nil {
-		return err
-	}
-	cur.Labels = want.Labels
-	cur.Annotations = want.Annotations
-	cur.Spec.Replicas = want.Spec.Replicas
-	cur.Spec.Strategy = want.Spec.Strategy
-	cur.Spec.Template = want.Spec.Template
-	_, err = c.Update(ctx, cur, metav1.UpdateOptions{})
-	return err
+	})
 }
 
 func (k Kube) EnsurePDB(ctx context.Context, want *policyv1.PodDisruptionBudget, enabled bool) error {
-	c := k.Client.PolicyV1().PodDisruptionBudgets(want.Namespace)
-	cur, err := c.Get(ctx, want.Name, metav1.GetOptions{})
-	switch {
-	case apierrors.IsNotFound(err) && !enabled:
-		return nil
-	case apierrors.IsNotFound(err):
-		_, err = c.Create(ctx, want, metav1.CreateOptions{})
+	// Another controller may update the object between our Get and Update
+	// (e.g. PDB status); re-read and retry instead of failing the reconcile.
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		c := k.Client.PolicyV1().PodDisruptionBudgets(want.Namespace)
+		cur, err := c.Get(ctx, want.Name, metav1.GetOptions{})
+		switch {
+		case apierrors.IsNotFound(err) && !enabled:
+			return nil
+		case apierrors.IsNotFound(err):
+			_, err = c.Create(ctx, want, metav1.CreateOptions{})
+			return err
+		case err != nil:
+			return err
+		case !enabled:
+			return c.Delete(ctx, want.Name, metav1.DeleteOptions{})
+		}
+		cur.Spec = want.Spec
+		_, err = c.Update(ctx, cur, metav1.UpdateOptions{})
 		return err
-	case err != nil:
-		return err
-	case !enabled:
-		return c.Delete(ctx, want.Name, metav1.DeleteOptions{})
-	}
-	cur.Spec = want.Spec
-	_, err = c.Update(ctx, cur, metav1.UpdateOptions{})
-	return err
+	})
 }
 
 // DeleteNamespace deletes ns and reports true once it is fully gone.
@@ -145,29 +162,33 @@ func maxUnavailableZero() *appsv1.DeploymentStrategy {
 }
 
 func (k Kube) EnsureStatefulSet(ctx context.Context, want *appsv1.StatefulSet) error {
-	c := k.Client.AppsV1().StatefulSets(want.Namespace)
-	cur, err := c.Get(ctx, want.Name, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		_, err = c.Create(ctx, want, metav1.CreateOptions{})
-		return err
-	}
-	if err != nil {
-		return err
-	}
-	// Selector, serviceName and volumeClaimTemplates are immutable; only the
-	// mutable fields are carried over.
-	cur.Labels = want.Labels
-	for k, v := range want.Annotations {
-		if cur.Annotations == nil {
-			cur.Annotations = map[string]string{}
+	// Another controller may update the object between our Get and Update
+	// (e.g. PDB status); re-read and retry instead of failing the reconcile.
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		c := k.Client.AppsV1().StatefulSets(want.Namespace)
+		cur, err := c.Get(ctx, want.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			_, err = c.Create(ctx, want, metav1.CreateOptions{})
+			return err
 		}
-		cur.Annotations[k] = v
-	}
-	cur.Spec.Replicas = want.Spec.Replicas
-	cur.Spec.Template = want.Spec.Template
-	cur.Spec.UpdateStrategy = want.Spec.UpdateStrategy
-	_, err = c.Update(ctx, cur, metav1.UpdateOptions{})
-	return err
+		if err != nil {
+			return err
+		}
+		// Selector, serviceName and volumeClaimTemplates are immutable; only the
+		// mutable fields are carried over.
+		cur.Labels = want.Labels
+		for k, v := range want.Annotations {
+			if cur.Annotations == nil {
+				cur.Annotations = map[string]string{}
+			}
+			cur.Annotations[k] = v
+		}
+		cur.Spec.Replicas = want.Spec.Replicas
+		cur.Spec.Template = want.Spec.Template
+		cur.Spec.UpdateStrategy = want.Spec.UpdateStrategy
+		_, err = c.Update(ctx, cur, metav1.UpdateOptions{})
+		return err
+	})
 }
 
 // LabelPod sets one label on a pod.

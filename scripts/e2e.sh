@@ -21,7 +21,11 @@ wait_phase() { # wait_phase <svc> <phase> <timeout>
   for i in $(seq 1 "$3"); do [ "$(field "$1" "s['status']['phase']")" = "$2" ] && return 0; sleep 1; done
   $CTL events "$1" | tail -20; fail "$1 did not reach $2 in $3s"
 }
-cleanup_svc() { $CTL delete "$1" >/dev/null 2>&1 || true; }
+cleanup_svc() { # delete a leftover from an earlier run and wait until it is gone
+  $CTL delete "$1" >/dev/null 2>&1 || return 0
+  for i in $(seq 1 120); do $CTL get "$1" >/dev/null 2>&1 || return 0; sleep 1; done
+  fail "leftover $1 was not deleted"
+}
 
 echo "== Kong gateway"
 cleanup_svc e2e-gw
@@ -29,14 +33,15 @@ $CTL create kong e2e-gw --replicas 2 --route echo=/echo=http://echo.default.svc:
 wait_phase e2e-gw Ready 180 && pass "gateway Ready"
 
 body=$(kubectl run curl-$RANDOM --rm -i --restart=Never --image=fleetd:dev --image-pull-policy=IfNotPresent \
-  --command -- /fleet-load -url http://kong-proxy.fleet-e2e-gw.svc/echo/hostname -rps 20 -for 5s -json 2>/dev/null | tail -1)
+  --command -- /fleet-load -url http://kong-proxy.fleet-e2e-gw.svc/echo/hostname -rps 20 -for 5s -json 2>/dev/null | grep "^{" | tail -1)
 python3 -c "import json,sys; r=json.loads('$body'); sys.exit(0 if r['ok']>0 and r['non2xx']+r['errors']==0 else 1)" \
   && pass "traffic through Kong: $body" || fail "traffic: $body"
 
 kubectl -n fleet-e2e-gw delete deploy kong --wait=false >/dev/null
-sleep 2
-wait_phase e2e-gw Ready 120
-$CTL events e2e-gw | grep -q DriftCorrected && pass "deleted Deployment was re-created" || fail "no DriftCorrected event"
+# (capture first: grep -q closing the pipe early would SIGPIPE fleetctl under pipefail)
+for i in $(seq 1 120); do ev=$($CTL events e2e-gw); [[ $ev == *"recovered in"* ]] && break; sleep 1; done
+[[ $ev == *DriftDetected* && $ev == *"recovered in"* ]] && pass "deleted Deployment was re-created: $(grep -o 'recovered in [0-9.]*s' <<<"$ev" | tail -1)" || fail "no drift recovery"
+[[ $ev == *ApplyFailed* ]] && fail "apply failed during heal" || true
 
 echo "== Postgres cluster"
 cleanup_svc e2e-db
@@ -46,7 +51,7 @@ NS=fleet-e2e-db
 P0=$(field e2e-db "s['status']['primary']")
 kubectl -n $NS exec "$P0" -- psql -U postgres -d app -Atc "CREATE TABLE orders(id serial primary key, item text); INSERT INTO orders(item) VALUES ('before-failover');" >/dev/null
 [ "$(kubectl -n $NS exec "$P0" -- psql -U postgres -d app -Atc 'SHOW work_mem')" = "8MB" ] && pass "work_mem applied" || fail "work_mem"
-kubectl -n $NS exec "$P0" -- psql -U postgres -d app -Atc "SELECT extname FROM pg_extension" | grep -q pgcrypto && pass "pgcrypto created" || fail "extension"
+[[ $(kubectl -n $NS exec "$P0" -- psql -U postgres -d app -Atc "SELECT extname FROM pg_extension") == *pgcrypto* ]] && pass "pgcrypto created" || fail "extension"
 
 REPLICA=$(kubectl -n $NS get pod -l fleet.dev/role=replica -o jsonpath='{.items[0].metadata.name}')
 for i in $(seq 1 20); do
@@ -69,12 +74,21 @@ for i in $(seq 1 60); do
 done
 [ "$n" = 2 ] && pass "old primary $P0 rejoined as a replica" || fail "rejoin"
 
-echo "== Automatic failover (primary pod killed)"
-kubectl -n $NS delete pod "$P1" --grace-period=0 --force >/dev/null 2>&1
-for i in $(seq 1 90); do P2=$(field e2e-db "s['status']['primary']"); [ "$P2" != "$P1" ] && break; sleep 1; done
-# Either a replica was promoted, or the pod came back fast enough that it stayed primary.
+echo "== Automatic failover (primary hung, not dead)"
+# SIGSTOP the primary's postmaster from the node (inside the container it is
+# PID 1, which ignores SIGSTOP from its own namespace). The pod stays "Running"
+# but stops answering: the case where a naive failover causes split brain.
+CID=$(kubectl -n $NS get pod "$P1" -o jsonpath='{.status.containerStatuses[0].containerID}' | sed 's|containerd://||')
+HPID=$(docker exec fleet-control-plane crictl inspect --output go-template --template '{{.info.pid}}' "$CID")
+docker exec fleet-control-plane kill -STOP "$HPID"
+SECONDS=0
+for i in $(seq 1 120); do P2=$(field e2e-db "s['status']['primary']"); [ "$P2" != "$P1" ] && break; sleep 1; done
+[ "$P2" != "$P1" ] && pass "hung primary $P1 replaced by $P2 after ${SECONDS}s" || fail "no automatic failover"
+kubectl -n $NS exec "$P2" -- psql -U postgres -d app -Atc "INSERT INTO orders(item) VALUES ('after-auto-failover')" >/dev/null
+rows=$(kubectl -n $NS exec "$P2" -- psql -U postgres -d app -Atc "SELECT count(*) FROM orders")
+[ "$rows" = 3 ] && pass "all committed rows present on $P2, writes accepted" || fail "rows after failover: $rows"
 wait_phase e2e-db Ready 240
-pass "cluster Ready again (primary now $(field e2e-db "s['status']['primary']"))"
+pass "old primary fenced and re-cloned; cluster Ready"
 
 echo "== Teardown"
 $CTL delete e2e-gw >/dev/null; $CTL delete e2e-db >/dev/null

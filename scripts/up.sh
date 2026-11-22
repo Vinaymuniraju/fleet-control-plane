@@ -9,7 +9,7 @@ kind get clusters | grep -qx "$CLUSTER" || kind create cluster --name "$CLUSTER"
 
 echo "==> building fleetd image"
 go build -o bin/fleetctl ./cmd/fleetctl
-docker build -q -t fleetd:dev . >/dev/null 2>&1
+make -s image
 kind load docker-image fleetd:dev --name "$CLUSTER" >/dev/null
 
 echo "==> deploying fleetd + state DB, echo upstream${SKIP_MONITORING:+ (monitoring skipped)}"

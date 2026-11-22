@@ -1,0 +1,7 @@
+# Fast, small local image: binaries are cross-compiled on the host by
+# `make image`, so no Go toolchain image or build cache lands in Docker.
+FROM gcr.io/distroless/static:nonroot
+COPY bin/linux/fleetd bin/linux/fleet-load /
+USER nonroot:nonroot
+EXPOSE 8080
+ENTRYPOINT ["/fleetd", "-kubeconfig="]

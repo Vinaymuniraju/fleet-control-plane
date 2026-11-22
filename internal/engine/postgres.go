@@ -17,7 +17,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/util/retry"
 
 	"github.com/Vinaymuniraju/fleet-control-plane/internal/model"
 )
@@ -150,7 +152,9 @@ fi
 echo "fleet: waiting for pg-rw to clone from"
 until pg_isready -h pg-rw -U postgres -t 2 >/dev/null 2>&1; do sleep 1; done
 echo "fleet: cloning from pg-rw"
-su-exec postgres env PGPASSWORD="$REPLICATION_PASSWORD" \
+find "$PGDATA" -mindepth 1 -delete # leftovers of an interrupted clone
+AS_PG=$(command -v gosu || command -v su-exec)
+"$AS_PG" postgres env PGPASSWORD="$REPLICATION_PASSWORD" \
   pg_basebackup -h pg-rw -U replicator -D "$PGDATA" -R -X stream -c fast
 exec docker-entrypoint.sh "$@"
 `
@@ -362,13 +366,15 @@ func (p *Postgres) topology(ctx context.Context, ns string) (topology, error) {
 }
 
 func (p *Postgres) setTopology(ctx context.Context, ns string, t topology) error {
-	cm, err := p.Kube.Client.CoreV1().ConfigMaps(ns).Get(ctx, pgTopology, metav1.GetOptions{})
-	if err != nil {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cm, err := p.Kube.Client.CoreV1().ConfigMaps(ns).Get(ctx, pgTopology, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		cm.Data = map[string]string{"primary": t.Primary, "bootstrapped": strconv.FormatBool(t.Bootstrapped)}
+		_, err = p.Kube.Client.CoreV1().ConfigMaps(ns).Update(ctx, cm, metav1.UpdateOptions{})
 		return err
-	}
-	cm.Data = map[string]string{"primary": t.Primary, "bootstrapped": strconv.FormatBool(t.Bootstrapped)}
-	_, err = p.Kube.Client.CoreV1().ConfigMaps(ns).Update(ctx, cm, metav1.UpdateOptions{})
-	return err
+	})
 }
 
 func (p *Postgres) pods(ctx context.Context, ns string) (map[string]*corev1.Pod, error) {
@@ -611,11 +617,8 @@ func (p *Postgres) Maintain(ctx context.Context, svc *model.Service) ([]model.Ev
 			}
 			applied = append(applied, name)
 		}
-		if sts.Annotations == nil {
-			sts.Annotations = map[string]string{}
-		}
-		sts.Annotations[annoSettings] = hash
-		if _, err := p.Kube.Client.AppsV1().StatefulSets(ns).Update(ctx, sts, metav1.UpdateOptions{}); err != nil {
+		patch := fmt.Sprintf(`{"metadata":{"annotations":{%q:%q}}}`, annoSettings, hash)
+		if _, err := p.Kube.Client.AppsV1().StatefulSets(ns).Patch(ctx, pgName, types.MergePatchType, []byte(patch), metav1.PatchOptions{}); err != nil {
 			return events, err
 		}
 		sort.Strings(applied)
