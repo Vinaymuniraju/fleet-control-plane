@@ -111,11 +111,43 @@ fence is lifted.
 
 ## Measured
 
-CHAOS_RESULTS_PLACEHOLDER
+All numbers are from a single-node kind cluster on a laptop (colima, 4 vCPU / 3 GB),
+under 50 req/s of live traffic from inside the cluster. Full tables and notes:
+[docs/chaos-results.md](docs/chaos-results.md). Reproduce with `make chaos` and `make e2e`.
+
+**Kong gateway, 2 replicas**
+
+| Fault | Back to Ready | Failed requests |
+| --- | --- | --- |
+| Kill 1 of 2 gateway pods | 3.2 s | 0 of 1,249 |
+| Kill all gateway pods | 2.9 s | 0 of 1,479 |
+| Scale the Deployment to 0 by hand | 3.8 s | 0 of 1,465 |
+| Delete the proxy Service by hand | 0.1 s | 0 of 999 |
+| Hand-edit the gateway ConfigMap | 0.1 s | 0 of 748 |
+| Delete the Deployment by hand | 1.4 s | 36 of 1,454 ¹ |
+| Add a route (rolling config change) | 7.4 s rollout | 0 of 1,495 |
+| Upgrade Kong 3.8 → 3.9 (rolling) | 20.8 s rollout | 0 of 2,079 |
+
+¹ The control plane re-created the Deployment in 1.4 s, but Kubernetes' garbage collector
+was already removing the old pods, and PodDisruptionBudgets don't apply to garbage
+collection. The real fix is to stop people deleting managed workloads (RBAC or an
+admission policy), not a faster reconcile.
+
+**Postgres, primary + 1 streaming replica**
+
+| Fault | Result |
+| --- | --- |
+| Primary **hung** (postmaster frozen with SIGSTOP; pod still "Running") | Replica promoted at 14.0 s (10 s of that is the deliberate grace period), writes accepted at 14.2 s, old primary fenced and re-cloned, cluster Ready at 17.4 s. Every committed row present on the new primary. |
+| Planned switchover | 0 bytes lost: the replica must replay to the primary's last LSN before promotion |
+| Hand-delete the Deployment / ConfigMap / Service of any engine | Shown as a `Warning` event and the `fleet_drift_detected_total` metric, then reverted |
+
+`scripts/e2e.sh` asserts all of this on every run (15 checks: traffic through Kong, drift
+heal, replication, settings, extensions, switchover with data check, hung-primary
+failover, rejoin, teardown).
 
 ## Run it
 
-Needs Docker (or colima), kind, kubectl and Go 1.24+. Fits on an 8 GB laptop.
+Needs Docker (or colima), kind, kubectl, Go and Python 3 (used by the scripts). Fits on an 8 GB laptop: give the Docker VM 3 GB.
 
 ```bash
 make build            # bin/fleetd, bin/fleetctl
@@ -129,7 +161,7 @@ kubectl -n monitoring port-forward svc/grafana 3000:3000 &   # dashboard at http
 ./bin/fleetctl failover orders     # planned switchover
 ./bin/fleetctl events orders
 
-make test             # unit tests (set FLEET_TEST_DSN to also run the Postgres store contract)
+make test             # unit tests (set FLEET_TEST_DSN=postgres://... to also run the Postgres store contract)
 make e2e              # full end-to-end on kind
 make chaos            # fault injection under load, writes docs/chaos-results.md
 ```
@@ -208,7 +240,7 @@ cmd/fleet-load    load generator used by chaos and e2e
 internal/api      REST handlers and validation
 internal/model    Service, Spec, Status, Event, allow-lists
 internal/store    Store interface, memory and Postgres implementations, shared contract tests
-internal/reconciler  work queue, informers, phases, recovery timing
+internal/reconciler work queue, informers, phases, recovery timing
 internal/engine   Kong and Postgres engines, Kubernetes helpers, exec
 internal/metrics  Prometheus collectors
 deploy/           fleetd + state DB, echo upstream, Prometheus + Grafana

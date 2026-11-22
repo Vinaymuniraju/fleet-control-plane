@@ -31,7 +31,7 @@ engines: `kong` (API gateways) and `postgres` (primary + streaming replica).
 - [x] **M5 Postgres engine**: primary + streaming replica (official `postgres:17` image, `pg_basebackup` init for the replica); health from `pg_stat_replication` lag; `PATCH` settings → `ALTER SYSTEM` + `pg_reload_conf()`; enable extensions; failover: promote replica with `pg_promote()` when the primary stays down, then re-point the Service.
 - [x] **M6 Postgres-backed state store**: the control plane keeps its own desired state in Postgres (`pgx`, migrations, optimistic concurrency via `resource_version`), selectable by flag; in-memory stays for tests.
 - [x] **M7 Tests + CI**: table-driven unit tests across api/store/engines/reconciler; `scripts/e2e.sh` on kind (create Kong service, route traffic, kill pod, assert recovery; create Postgres, write, failover, read); GitHub Actions running vet + tests (+ kind e2e job).
-- [ ] **M8 README**: architecture diagram, quickstart, demo walkthrough, measured numbers, design decisions and trade-offs, "what production would need" (multi-cloud cells, SLOs, tenancy, upgrades), role mapping table.
+- [x] **M8 README**: architecture diagram, quickstart, demo walkthrough, measured numbers, design decisions and trade-offs, "what production would need" (multi-cloud cells, SLOs, tenancy, upgrades), role mapping table.
 - [ ] M9 (stretch) Postgres backups with WAL archiving to MinIO (S3) and point-in-time restore.
 - [ ] M10 (stretch) Canary config rollout for Kong with automatic rollback on error-rate rise.
 
@@ -46,3 +46,4 @@ engines: `kong` (API gateways) and `postgres` (primary + streaming replica).
 - 2026-11-23 M5: on kind: primary + streaming replica, ALTER SYSTEM settings, extensions; planned switchover 0 bytes lost; hung primary (SIGSTOP from node) auto-failover: promoted 14.0s, writable 14.2s, old primary fenced + re-cloned, Ready 17.4s. Fixed: gosu vs su-exec in postgres:17-alpine; RetryOnConflict for k8s updates.
 - 2026-11-23 M6: Postgres store (pgx, embedded migrations under advisory lock, CAS on resource_version); same contract suite passes on memory and Postgres; fleetd in-cluster now keeps state in fleetdb and survives restarts.
 - 2026-11-23 M7: unit tests across api/store/engines/reconciler/metrics pass with -race; scripts/e2e.sh ALL PASSED on kind (Kong traffic + drift heal, Postgres replication, switchover, hung-primary failover, teardown); GitHub Actions workflow with Postgres service + kind e2e job (not run yet: repo not pushed).
+- 2026-11-23 M8: README with architecture, failover walkthrough, measured Kong + Postgres results, run instructions, API, metrics, trade-offs, production gaps; docs/chaos-results.md with notes. 66 test cases pass with -race.
