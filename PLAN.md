@@ -25,7 +25,7 @@ engines: `kong` (API gateways) and `postgres` (primary + streaming replica).
 
 - [x] **M0 Toolchain**: Homebrew `go kind kubectl colima docker`; `colima start --cpu 4 --memory 3`; `kind create cluster --name fleet`; check `kubectl get nodes`.
 - [x] **M1 Skeleton**: Go module `github.com/Vinaymuniraju/fleet-control-plane`; `cmd/fleetd` (server) + `cmd/fleetctl` (CLI); `internal/api` REST on stdlib `net/http` (`POST/GET/PATCH/DELETE /v1/services`); `internal/store` interface with in-memory impl; Makefile; unit tests for the API.
-- [ ] **M2 Kong engine**: `internal/engine` interface (`Apply`, `Observe`, `Delete`); Kong engine creates Namespace, ConfigMap (declarative `kong.yml`), Deployment (Kong OSS DB-less, N replicas), Service via client-go; observes readiness through the Admin API `/status`; unit tests with the fake clientset.
+- [x] **M2 Kong engine**: `internal/engine` interface (`Apply`, `Observe`, `Delete`); Kong engine creates Namespace, ConfigMap (declarative `kong.yml`), Deployment (Kong OSS DB-less, N replicas), Service via client-go; observes readiness through the Admin API `/status`; unit tests with the fake clientset.
 - [ ] **M3 Reconciler**: periodic + event-triggered loop comparing desired vs observed; config hash annotation drives rolling config updates; image change drives version upgrades; drift detection (manual edit / deleted Deployment) and self-heal; per-service event log at `GET /v1/services/{id}/events`.
 - [ ] **M4 Observability + chaos**: Prometheus metrics (`reconcile_duration_seconds`, `drift_detected_total`, `service_ready`, `recovery_seconds`); `deploy/` manifests for Prometheus + a Grafana dashboard JSON; `scripts/chaos.sh` kills pods / deletes Deployments and records time-to-recover; numbers go into README.
 - [ ] **M5 Postgres engine**: primary + streaming replica (official `postgres:17` image, `pg_basebackup` init for the replica); health from `pg_stat_replication` lag; `PATCH` settings → `ALTER SYSTEM` + `pg_reload_conf()`; enable extensions; failover: promote replica with `pg_promote()` when the primary stays down, then re-point the Service.
@@ -39,4 +39,5 @@ engines: `kong` (API gateways) and `postgres` (primary + streaming replica).
 
 <!-- one line per finished milestone: date, milestone, what was verified -->
 - 2026-11-23 M0: go 1.27.4, colima 4cpu/3GB, kind v1.37 node `fleet-control-plane` Ready.
-- 2026-11-23 M1: REST API + in-memory store with optimistic concurrency; 26 unit tests pass with -race; CLI smoke run (create, scale, list, events) OK.
+- 2026-11-23 M1: REST API + in-memory store with optimistic concurrency; 16 tests + 13 validation subtests pass with -race; CLI smoke run (create, scale, list, events) OK.
+- 2026-11-23 M2: Kong engine (namespace, ConfigMap, Deployment maxUnavailable=0, proxy/admin Services, PDB) + drift detection + Admin API route probe; fake-clientset tests cover apply, idempotency, config roll, 5 drift cases healed by re-apply, delete.
