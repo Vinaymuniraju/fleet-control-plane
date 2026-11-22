@@ -29,7 +29,8 @@ const (
 	PhasePending      Phase = "Pending"      // accepted, nothing applied yet
 	PhaseProvisioning Phase = "Provisioning" // resources applied, not ready
 	PhaseReady        Phase = "Ready"        // all replicas serving
-	PhaseDegraded     Phase = "Degraded"     // serving, but below desired replicas or lagging
+	PhaseUpdating     Phase = "Updating"     // rolling out a new generation
+	PhaseDegraded     Phase = "Degraded"     // below desired replicas, lagging, or drifted
 	PhaseFailed       Phase = "Failed"       // apply failed; see Status.Message
 	PhaseDeleting     Phase = "Deleting"
 )
