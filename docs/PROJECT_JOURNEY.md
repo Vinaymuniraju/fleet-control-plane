@@ -916,14 +916,6 @@ colima stop              # frees the 3 GB of RAM; `colima delete` also frees the
 - **What would you do differently at scale?** Cells per region or cloud, sharded
   reconcilers, leader election, canary rollouts, and SLOs on the control plane itself.
 
-### A note on how it was built
-
-This project was built in one long session with **Claude Code** (an AI coding
-assistant) as a pair programmer, which is why commits carry a `Co-Authored-By` line.
-Before an interview, the author should be able to explain every file: read the code,
-rerun `make e2e`, break things by hand, and try one of the improvements in section 10.
-That is what turns "I have this repo" into "I understand this system".
-
 ---
 
 ## 13. Glossary
